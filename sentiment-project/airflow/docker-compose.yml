@@ -1,0 +1,266 @@
+# Docker Compose for Airflow with Spark and MLflow integration
+# This setup includes:
+# - Airflow (scheduler, webserver, worker)
+# - PostgreSQL (Airflow metadata)
+# - Redis (Celery message broker)
+# - MLflow tracking server
+# - Spark master and workers (optional)
+
+x-airflow-common:
+  &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: custom-airflow:2.8.0
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # MLflow configuration - External GCP server
+    MLFLOW_TRACKING_URI: http://34.66.73.187:5000
+    # GCP Dataproc configuration (update with your values)
+    GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/gcp-credentials.json
+    GCP_PROJECT_ID: ${GCP_PROJECT_ID:-your-project-id}
+    GCP_REGION: ${GCP_REGION:-us-central1}
+    DATAPROC_CLUSTER_NAME: ${DATAPROC_CLUSTER_NAME:-sentiment-cluster}
+    # Spark configuration for GCP
+    PYSPARK_PYTHON: /usr/local/bin/python
+    # Custom variables
+    AIRFLOW_VAR_MLFLOW_TRACKING_URI: http://34.66.73.187:5000
+    AIRFLOW_VAR_DATA_INPUT_PATH: /opt/airflow/data/raw/sentiment140/training.1600000.processed.noemoticon.csv
+    AIRFLOW_VAR_DATA_OUTPUT_PATH: /opt/airflow/data/clean
+    AIRFLOW_VAR_MODEL_OUTPUT_PATH: /opt/airflow/models
+    AIRFLOW_VAR_CODE_PATH: /opt/airflow/code
+  volumes:
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
+    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ../code:/opt/airflow/code
+    - ../data_raw:/opt/airflow/data/raw
+    - ../data_clean:/opt/airflow/data/clean
+    - ../models:/opt/airflow/models
+    # Mount GCP credentials (create gcp-credentials.json first)
+    - ${AIRFLOW_PROJ_DIR:-.}/gcp-credentials.json:/opt/airflow/gcp-credentials.json:ro
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+
+services:
+  # PostgreSQL for Airflow metadata
+  postgres:
+    image: postgres:14
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # Redis for Celery message broker
+  redis:
+    image: redis:7.2-alpine
+    expose:
+      - 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+      start_period: 30s
+    restart: always
+
+  # Airflow webserver
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Airflow scheduler
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Airflow worker
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" || celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      DUMB_INIT_SETSID: "0"
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Airflow triggerer
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Airflow initialization
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        if [[ -z "${AIRFLOW_UID}" ]]; then
+          echo "AIRFLOW_UID not set!"
+          exit 1
+        fi
+        one_meg=1048576
+        mem_available=$$(($$(getconf _PHYS_PAGES) * $$(getconf PAGE_SIZE) / one_meg))
+        cpus_available=$$(grep -cE 'cpu[0-9]+' /proc/stat)
+        disk_available=$$(df / | tail -1 | awk '{print $$4}')
+        warning_resources="false"
+        if (( mem_available < 4000 )) ; then
+          echo "WARNING: Not enough memory available for Docker."
+          warning_resources="true"
+        fi
+        if (( cpus_available < 2 )); then
+          echo "WARNING: Not enough CPUs available for Docker."
+          warning_resources="true"
+        fi
+        if (( disk_available < one_meg * 10 )); then
+          echo "WARNING: Not enough Disk space available for Docker."
+          warning_resources="true"
+        fi
+        if [[ $${warning_resources} == "true" ]]; then
+          echo "WARNING: Please increase resource allocation for Docker."
+        fi
+        echo "Creating directory structure..."
+        mkdir -p /sources/logs /sources/dags /sources/plugins /sources/config
+        mkdir -p /opt/airflow/logs/scheduler
+        mkdir -p /opt/airflow/data/raw/sentiment140
+        mkdir -p /opt/airflow/data/clean
+        mkdir -p /opt/airflow/models
+        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins,config}
+        chown -R "${AIRFLOW_UID}:0" /opt/airflow/logs
+        chown -R "${AIRFLOW_UID}:0" /opt/airflow/data
+        chown -R "${AIRFLOW_UID}:0" /opt/airflow/models
+        chmod -R 775 /sources/{logs,dags,plugins,config}
+        chmod -R 775 /opt/airflow/logs
+        chmod -R 775 /opt/airflow/data
+        chmod -R 775 /opt/airflow/models
+        echo "Initializing Airflow database..."
+        su -s /bin/bash airflow -c "airflow db migrate"
+        echo "Creating admin user..."
+        su -s /bin/bash airflow -c "airflow users create \
+          --username airflow \
+          --firstname Airflow \
+          --lastname Admin \
+          --role Admin \
+          --email admin@example.com \
+          --password airflow" || echo "User already exists"
+        echo "Initialization complete!"
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+      _PIP_ADDITIONAL_REQUIREMENTS: ''
+      PATH: /home/airflow/.local/bin:/usr/local/bin:/usr/bin:/bin
+    user: "0:0"
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}:/sources
+
+  # Airflow CLI
+  airflow-cli:
+    <<: *airflow-common
+    profiles:
+      - debug
+    environment:
+      <<: *airflow-common-env
+      CONNECTION_CHECK_MAX_COUNT: "0"
+    command:
+      - bash
+      - -c
+      - airflow
+
+  # Note: MLflow server running externally on GCP at http://34.66.73.187:5000
+  # Local MLflow service disabled - using external server
+
+  # Flower (Celery monitoring)
+  flower:
+    <<: *airflow-common
+    command: celery flower
+    profiles:
+      - flower
+    ports:
+      - "5555:5555"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:5555/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db-volume:

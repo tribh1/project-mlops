@@ -1,0 +1,32 @@
+# Airflow requirements - additional packages for sentiment analysis pipeline
+# Install with: pip install -r requirements.txt
+
+# Core Airflow providers
+apache-airflow-providers-apache-spark~=4.0
+apache-airflow-providers-celery~=3.0
+apache-airflow-providers-postgres~=5.0
+apache-airflow-providers-redis~=3.0
+apache-airflow-providers-google~=10.0  # For GCP Dataproc integration
+
+# MLflow integration
+mlflow~=2.9
+boto3~=1.28  # For S3 artifact storage (optional)
+google-cloud-storage~=2.10  # For GCS artifact storage
+
+# Spark and ML libraries
+pyspark~=3.5
+numpy~=1.24
+pandas~=2.0
+
+# Visualization
+matplotlib~=3.7
+seaborn~=0.12
+
+# Data validation
+great-expectations~=0.18  # Optional: for advanced data validation
+
+# Monitoring and alerting
+slack-sdk~=3.23  # Optional: for Slack notifications
+
+# Additional utilities
+python-dotenv~=1.0

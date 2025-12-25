@@ -1,0 +1,2 @@
+kaggle>=1.5.12
+google-cloud-storage>=2.0.0
