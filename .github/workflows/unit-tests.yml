@@ -38,7 +38,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest fastapi pydantic joblib nltk
+          python -m pip install pytest fastapi pydantic joblib nltk httpx
 
       - name: Run unit tests
         working-directory: sentiment-serving
