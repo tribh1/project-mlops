@@ -372,6 +372,13 @@ notify_slack = SlackWebhookOperator(
 ### Monitoring
 
 1. **Prometheus + Grafana**: Monitor Airflow metrics
+   - Grafana URL: http://104.197.251.174:3000/
+   - Username: `admin`
+   - Password: `admin@123`
+   - Suggested dashboards:
+     - Airflow scheduler health
+     - DAG run duration and success rate
+     - Celery worker queues and task throughput
 2. **Flower**: Monitor Celery workers (http://localhost:5555)
 3. **CloudWatch/Datadog**: Infrastructure monitoring
 
